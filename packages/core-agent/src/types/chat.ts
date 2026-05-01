@@ -9,6 +9,14 @@ export interface ChatSlicesText {
 export interface ChatSlicesToolCall {
   type: 'tool-call'
   toolCall: CompletionToolCall
+  /**
+   * True while the model is still emitting `tool-call-delta` events for
+   * this call. Flips to false (or is omitted) once the final `tool-call`
+   * event arrives with the complete arguments. The chat UI uses this to
+   * render the call block immediately with growing partial args, instead
+   * of waiting for the full call to materialize.
+   */
+  streaming?: boolean
 }
 
 export interface ChatSlicesToolCallResult {
@@ -31,6 +39,14 @@ export interface ChatAssistantMessage extends AssistantMessage {
     speech: string
     reasoning: string
   }
+  /**
+   * Streamed reasoning content emitted by reasoning-capable models (e.g. Qwen 3
+   * via LM Studio's `separateReasoningContentInAPI`). Distinct from
+   * `categorization.reasoning`, which is AIRI's own speech-vs-reasoning
+   * heuristic on the visible response. This field captures the model's raw
+   * chain-of-thought from xsai's `reasoning-delta` events.
+   */
+  reasoning?: string
 }
 
 export type ChatMessage = ChatAssistantMessage | SystemMessage | ToolMessage | UserMessage

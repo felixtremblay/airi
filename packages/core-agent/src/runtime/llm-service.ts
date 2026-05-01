@@ -1,11 +1,42 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
-import type { Message, Tool } from '@xsai/shared-chat'
+import type { Message, StopCondition, Tool } from '@xsai/shared-chat'
 
 import type { StreamFromOptions, StreamOptions } from '../types/llm'
 
 import { errorMessageFrom } from '@moeru/std'
-import { stepCountAtLeast } from '@xsai/shared-chat'
+import { or, stepCountAtLeast } from '@xsai/shared-chat'
 import { streamText } from '@xsai/stream-text'
+
+/**
+ * Stops the tool-calling loop when the model emits the same tool with the
+ * same arguments twice in a row.
+ *
+ * Use when:
+ * - Composing the `stopWhen` condition for `streamText` to guard against
+ *   models that get stuck in a tool-call loop (especially for one-shot
+ *   playback tools that return immediately and tempt the model to keep
+ *   re-issuing the same call).
+ *
+ * Expects:
+ * - At least two prior steps with tool calls; otherwise returns false.
+ *
+ * Returns:
+ * - `true` when the latest step's first tool call name + args exactly match
+ *   the previous step's, signaling a likely runaway loop.
+ */
+const stopOnConsecutiveDuplicateToolCall: StopCondition = ({ steps }) => {
+  if (steps.length < 2)
+    return false
+  const last = steps[steps.length - 1]
+  const prev = steps[steps.length - 2]
+  const lastCall = last?.toolCalls?.[0]
+  const prevCall = prev?.toolCalls?.[0]
+  if (!lastCall || !prevCall)
+    return false
+  if (lastCall.toolName !== prevCall.toolName)
+    return false
+  return lastCall.args === prevCall.args
+}
 
 export function sanitizeMessages(messages: unknown[]): Message[] {
   return messages.map((message: any) => {
@@ -168,7 +199,7 @@ export async function streamFrom({
         abortSignal: options?.abortSignal,
         messages: sanitized,
         headers: options?.headers,
-        stopWhen: stepCountAtLeast(10),
+        stopWhen: or(stepCountAtLeast(10), stopOnConsecutiveDuplicateToolCall),
         // NOTICE:
         // Do not pass xsAI's `captureToolErrors` option here. In the installed
         // @xsai/stream-text version, stream options are spread into the provider

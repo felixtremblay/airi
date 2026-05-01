@@ -3,7 +3,10 @@ import type { CommonContentPart, CompletionToolCall, CompletionToolResult, Messa
 
 export type StreamEvent
   = | { type: 'text-delta', text: string }
+    | { type: 'reasoning-delta', text: string }
     | ({ type: 'finish' } & any)
+    | { type: 'tool-call-streaming-start', toolCallId: string, toolName: string }
+    | { type: 'tool-call-delta', toolCallId: string, toolName: string, argsTextDelta: string }
     | ({ type: 'tool-call' } & CompletionToolCall)
     | (CompletionToolResult & { type: 'tool-error' })
     | { type: 'tool-result', toolCallId: string, result?: string | CommonContentPart[] }

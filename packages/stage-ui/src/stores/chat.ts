@@ -120,6 +120,15 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const pendingQueuedSendCount = computed(() => pendingQueuedSends.value.length)
   const hooks = createChatHooks()
 
+  /**
+   * Per-session AbortController registry. The key is the chat session id, the
+   * value is the controller for that session's in-flight LLM HTTP stream. We
+   * pass `controller.signal` straight through to xsai's `streamText`, so
+   * calling `.abort()` actually closes the underlying SSE connection rather
+   * than just flagging the renderer to discard further deltas.
+   */
+  const streamControllers = new Map<string, AbortController>()
+
   const sendQueue = createQueue<QueuedSend>({
     handlers: [
       async ({ data }) => {
@@ -201,7 +210,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     const isForegroundSession = () => sessionId === activeSessionId.value
 
-    const buildingMessage: StreamingAssistantMessage = { role: 'assistant', content: '', slices: [], tool_results: [], createdAt: Date.now(), id: nanoid() }
+    const buildingMessage: StreamingAssistantMessage = { role: 'assistant', content: '', slices: [], tool_results: [], reasoning: '', createdAt: Date.now(), id: nanoid() }
 
     const updateUI = () => {
       if (isForegroundSession()) {
@@ -270,8 +279,17 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
           categorizer.consume(literal)
 
-          const speechOnly = categorizer.filterToSpeech(literal, streamPosition)
+          const speechOnlyRaw = categorizer.filterToSpeech(literal, streamPosition)
           streamPosition += literal.length
+
+          // Strip orphan `<|` / `|>` framing artifacts before they reach the
+          // UI, slices, or TTS. The marker parser already routes well-formed
+          // `<|...|>` pairs to onSpecial; anything left in the literal stream
+          // is a model artifact (e.g. small Ollama models bleeding training-time
+          // tool-call template tokens, or the model emitting `|>` as a visual
+          // motif). Both delimiters are reserved by this app, so dropping
+          // unmatched fragments cannot lose legitimate content.
+          const speechOnly = speechOnlyRaw.replace(/\|>|<\|/g, '')
 
           if (speechOnly.trim()) {
             buildingMessage.content += speechOnly
@@ -324,7 +342,12 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             }
 
             if (ctx.data.type === 'tool-call-result') {
+              // Mirror the result into both buckets:
+              // - `tool_results` is consumed by the next LLM turn as `tool` role messages.
+              // - `slices` lets the chat UI pair the result back with its originating
+              //   `tool-call` slice and surface state (executing/done/error) to the user.
               buildingMessage.tool_results.push(ctx.data)
+              buildingMessage.slices.push(ctx.data)
               updateUI()
             }
           },
@@ -431,23 +454,87 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       const llmRequestTs = performance.now()
       let llmFirstTokenEmitted = false
 
+      // Register an AbortController for this session's in-flight stream so
+      // `abortSession(sessionId)` can actually cancel the underlying HTTP
+      // request, not just flip a flag in the renderer.
+      const streamController = new AbortController()
+      streamControllers.set(sessionId, streamController)
+
       try {
         await llmStore.stream(options.model, options.chatProvider, newMessages as Message[], {
           headers,
           tools: options.tools,
+          abortSignal: streamController.signal,
           // NOTICE: xsai stream may emit `finish` before tool steps continue, so keep waiting until
           // the final non-tool finish to avoid ending the chat turn with no assistant reply.
           waitForTools: true,
           captureToolErrors: true,
           onStreamEvent: async (event: StreamEvent) => {
             switch (event.type) {
-              case 'tool-call':
-                toolCallQueue.enqueue({
+              case 'tool-call-streaming-start': {
+                // Show the tool-call block in the UI as soon as the model
+                // starts emitting a tool call, instead of waiting for the
+                // final `tool-call` event with complete args. The slice
+                // grows in place via subsequent `tool-call-delta` events.
+                // Parser flush keeps any buffered literal text in front of
+                // the tool-call block (same reason as the `tool-call` case).
+                await parser.flush()
+                buildingMessage.slices.push({
                   type: 'tool-call',
-                  toolCall: event,
+                  streaming: true,
+                  toolCall: {
+                    toolCallId: event.toolCallId,
+                    toolName: event.toolName,
+                    toolCallType: 'function',
+                    args: '',
+                  },
                 })
-
+                updateUI()
                 break
+              }
+              case 'tool-call-delta': {
+                // Append the args delta onto the matching streaming slice.
+                // Walk from the end since the active streaming slice is
+                // typically the most recent tool-call slice.
+                for (let i = buildingMessage.slices.length - 1; i >= 0; i--) {
+                  const slice = buildingMessage.slices[i]
+                  if (slice.type === 'tool-call' && slice.toolCall.toolCallId === event.toolCallId) {
+                    slice.toolCall.args = (slice.toolCall.args ?? '') + event.argsTextDelta
+                    updateUI()
+                    break
+                  }
+                }
+                break
+              }
+              case 'tool-call': {
+                // Flush any literal text still buffered by the marker parser
+                // before appending the tool-call slice, otherwise the last
+                // few chars before the call would surface only after the
+                // tool-call block when the next text-delta arrives.
+                await parser.flush()
+                // If a streaming slice already exists for this call (xsai
+                // emitted streaming-start + deltas first), finalize it in
+                // place. Otherwise, fall back to the old behavior and
+                // enqueue a fresh slice.
+                let finalizedExisting = false
+                for (let i = buildingMessage.slices.length - 1; i >= 0; i--) {
+                  const slice = buildingMessage.slices[i]
+                  if (slice.type === 'tool-call' && slice.toolCall.toolCallId === event.toolCallId) {
+                    slice.toolCall = event
+                    slice.streaming = false
+                    updateUI()
+                    finalizedExisting = true
+                    break
+                  }
+                }
+                if (!finalizedExisting) {
+                  toolCallQueue.enqueue({
+                    type: 'tool-call',
+                    toolCall: event,
+                  })
+                }
+                break
+              }
               case 'tool-result':
                 toolCallQueue.enqueue({
                   type: 'tool-call-result',
@@ -464,6 +551,12 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
                   result: event.result,
                 })
 
+                break
+              case 'reasoning-delta':
+                if (shouldAbort())
+                  break
+                buildingMessage.reasoning = (buildingMessage.reasoning ?? '') + event.text
+                updateUI()
                 break
               case 'text-delta':
                 if (!llmFirstTokenEmitted) {
@@ -527,8 +620,45 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         activeTurnSpan.value.end()
         activeTurnSpan.value = undefined
       }
+      // Remove the controller for this session so a subsequent stop click
+      // after generation has finished doesn't try to abort a closed stream.
+      streamControllers.delete(sessionId)
       sending.value = false
     }
+  }
+
+  /**
+   * Aborts the in-flight LLM stream for the given (or active) session and
+   * bumps its generation counter so the renderer cleans up partially-received
+   * deltas. Idempotent — safe to call when nothing is streaming.
+   *
+   * Use when:
+   * - The user clicks a stop/cancel button while the assistant is generating
+   *   (including during the reasoning phase, before any visible output).
+   *
+   * Expects:
+   * - A session id, or falls back to `chatSession.activeSessionId`.
+   *
+   * Returns:
+   * - `true` if a controller was found and aborted, `false` otherwise.
+   */
+  function abortSession(targetSessionId?: string): boolean {
+    const sessionId = targetSessionId ?? chatSession.activeSessionId
+    if (!sessionId)
+      return false
+
+    const controller = streamControllers.get(sessionId)
+    if (controller) {
+      controller.abort()
+      streamControllers.delete(sessionId)
+    }
+
+    // Always bump the generation, even when no controller was found — that
+    // covers the in-renderer event-loop cleanup path (parser flush, slice
+    // persistence) and any subsequent late deltas that have already left
+    // the wire but haven't been processed yet.
+    chatSession.bumpSessionGeneration(sessionId)
+    return controller != null
   }
 
   async function ingest(
@@ -599,6 +729,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     ingest,
     ingestOnFork,
+    abortSession,
     cancelPendingSends,
     getPendingQueuedSendSnapshot,
 

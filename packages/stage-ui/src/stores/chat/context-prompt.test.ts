@@ -3,7 +3,7 @@ import type { ContextSnapshot } from './context-prompt'
 import { ContextUpdateStrategy } from '@proj-airi/server-sdk'
 import { describe, expect, it } from 'vitest'
 
-import { buildContextPromptMessage, formatContextPromptText } from './context-prompt'
+import { buildContextPromptMessage, formatContextPromptText, formatToolUsePromptText } from './context-prompt'
 
 function makeContext(overrides: Record<string, unknown> = {}): ContextSnapshot {
   return {
@@ -99,5 +99,29 @@ describe('buildContextPromptMessage', () => {
     expect(msg).not.toBeNull()
     expect(msg!.role).toBe('user')
     expect(msg!.content).toBeInstanceOf(Array)
+  })
+})
+
+describe('formatToolUsePromptText', () => {
+  it('returns empty string when no tools are available', () => {
+    expect(formatToolUsePromptText([])).toBe('')
+  })
+
+  it('renders native tool-calling rules with exact tool names', () => {
+    const text = formatToolUsePromptText([
+      {
+        name: 'search',
+        description: 'Search the web.',
+      },
+      {
+        name: 'read_file',
+      },
+    ])
+
+    expect(text.startsWith('[Tool Use]')).toBe(true)
+    expect(text).toContain('real callable tool functions')
+    expect(text).toContain('Do not describe, roleplay, or print a fake call')
+    expect(text).toContain('- search: Search the web.')
+    expect(text).toContain('- read_file')
   })
 })

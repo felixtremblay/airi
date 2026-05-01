@@ -29,7 +29,7 @@ import { createWindowAuthManagerService } from './services/airi/auth'
 import { setupServerChannel } from './services/airi/channel-server'
 import { setupGodotStageManager } from './services/airi/godot-stage'
 import { setupBuiltInServer } from './services/airi/http-server'
-import { setupMcpStdioManager } from './services/airi/mcp-servers'
+import { createMcpServersService, setupMcpStdioManager } from './services/airi/mcp-servers'
 import { setupPluginHost } from './services/airi/plugins'
 import { setupArtistryBridge } from './services/airi/widgets/artistry-bridge'
 import { setupAutoUpdater } from './services/electron/auto-updater'
@@ -144,6 +144,37 @@ app.whenReady().then(async () => {
     build: async () => setupMcpStdioManager(),
   })
 
+  // NOTICE:
+  // MCP services (callTool/listTools/etc) are registered on a single
+  // window-agnostic eventa context, not per-window. Each per-window
+  // `createContext(ipcMain, window)` adds its own
+  // `ipcMain.on('eventa-message', ...)` listener (eventa main adapter,
+  // node_modules/@moeru/eventa/dist/adapters/electron/main.mjs:33), and the
+  // inbound side does not filter by `event.sender.id`, so a renderer invoke
+  // is dispatched into every active window's context. Each context has its
+  // own `defineInvokeHandler(electronMcpCallTool, ...)`, so the MCP tool
+  // call hits `session.client.callTool` once per active window — observed
+  // as 2x wire requests on handy-mcp when main+chat were both open.
+  // Routing responses still works because an unbound context sends replies
+  // via `options.raw.ipcMainEvent.sender.send` (same file, line 27), so the
+  // original sender's renderer receives its reply. Exposing this as an
+  // injeca provider (rather than registering it inside an `injeca.invoke`
+  // callback) lets each window provider depend on it, which guarantees MCP
+  // RPC is wired before any renderer can issue an invoke — important for
+  // the desktop-overlay window whose `onMounted` polls `desktop_get_state`
+  // immediately on load.
+  // Removal condition: when eventa supports window-namespaced contexts (see
+  // the project-wide TODOs around `ipcMain.setMaxListeners`), the per-window
+  // registrations can be safely re-added without duplication.
+  const globalRpcContext = injeca.provide('rpc:global-context', {
+    dependsOn: { mcpStdioManager },
+    build: ({ dependsOn }) => {
+      const { context } = createContext(ipcMain)
+      createMcpServersService({ context, manager: dependsOn.mcpStdioManager })
+      return context
+    },
+  })
+
   const widgetsManager = injeca.provide('windows:widgets', {
     dependsOn: { serverChannel, i18n },
     build: ({ dependsOn }) => setupWidgetsWindowManager(dependsOn),
@@ -177,17 +208,17 @@ app.whenReady().then(async () => {
   })
 
   const chatWindow = injeca.provide('windows:chat', {
-    dependsOn: { widgetsManager, serverChannel, mcpStdioManager, i18n },
+    dependsOn: { widgetsManager, serverChannel, globalRpcContext, i18n },
     build: ({ dependsOn }) => setupChatWindowReusableFunc(dependsOn),
   })
 
   const settingsWindow = injeca.provide('windows:settings', {
-    dependsOn: { widgetsManager, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, mcpStdioManager, i18n, windowAuthManager },
+    dependsOn: { widgetsManager, beatSync, autoUpdater, devtoolsWindow: devtoolsMarkdownStressWindow, serverChannel, godotStageManager, globalRpcContext, i18n, windowAuthManager },
     build: async ({ dependsOn }) => setupSettingsWindowReusableFunc(dependsOn),
   })
 
   const mainWindow = injeca.provide('windows:main', {
-    dependsOn: { settingsWindow, chatWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager, windowAuthManager },
+    dependsOn: { settingsWindow, chatWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, globalRpcContext, i18n, onboardingWindowManager, windowAuthManager },
     build: async ({ dependsOn }) => setupMainWindow(dependsOn),
   })
 
@@ -204,7 +235,7 @@ app.whenReady().then(async () => {
   // Desktop grounding overlay — gated by AIRI_DESKTOP_OVERLAY=1
   if (isDesktopOverlayEnabled()) {
     const desktopOverlay = injeca.provide('windows:desktop-overlay', {
-      dependsOn: { mcpStdioManager, serverChannel, i18n },
+      dependsOn: { globalRpcContext, serverChannel, i18n },
       build: async ({ dependsOn }) => setupDesktopOverlayWindow(dependsOn),
     })
 
@@ -218,12 +249,13 @@ app.whenReady().then(async () => {
   }
 
   injeca.invoke({
-    dependsOn: { mainWindow, tray, serverChannel, airiHttpServer, godotStageManager, pluginHost, mcpStdioManager, onboardingWindow: onboardingWindowManager, widgetsWindow: widgetsManager, artistryConfig },
+    dependsOn: { mainWindow, tray, serverChannel, airiHttpServer, godotStageManager, pluginHost, globalRpcContext, onboardingWindow: onboardingWindowManager, widgetsWindow: widgetsManager, artistryConfig },
     callback: async (deps) => {
-      const { context } = createContext(ipcMain)
       await setupArtistryBridge({
         widgetsManager: deps.widgetsWindow,
-        context,
+        // Reuse the same window-agnostic context that backs MCP RPC so
+        // ipcMain only carries one extra listener rather than two.
+        context: deps.globalRpcContext,
         artistryConfig: deps.artistryConfig,
       })
     },

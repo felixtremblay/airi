@@ -59,6 +59,7 @@ type ChatSyncMessage
     | { type: 'command', authorityId?: string, requestId: string, senderId: string, command: 'retry', payload: RetryCommandPayload }
     | { type: 'command', authorityId?: string, requestId: string, senderId: string, command: 'cleanup', payload: { sessionId?: string } }
     | { type: 'command', authorityId?: string, requestId: string, senderId: string, command: 'delete-message', payload: { sessionId?: string, messageId?: string, index?: number } }
+    | { type: 'command', authorityId?: string, requestId: string, senderId: string, command: 'cancel', payload: { sessionId?: string } }
     | { type: 'response', requestId: string, authorityId: string, ok: boolean, error?: string }
 
 interface PendingRequest {
@@ -394,6 +395,12 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
         case 'delete-message':
           executeDeleteMessage(message.payload)
           break
+        case 'cancel':
+          // The streamController lives on the authority's chatOrchestrator,
+          // so this is the only place where calling .abort() actually closes
+          // the underlying HTTP stream to the LLM provider.
+          chatOrchestrator.abortSession(message.payload.sessionId)
+          break
       }
 
       respond(true)
@@ -602,6 +609,42 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
     authorityId.value = null
   }
 
+  /**
+   * Cancels the in-flight assistant generation for the active (or specified)
+   * session. When the local instance is the authority, aborts the underlying
+   * HTTP stream directly. When this instance is a follower (e.g. the dedicated
+   * chat sub-window), dispatches a `cancel` command across the chat-sync
+   * channel so the authority can abort its own controller — only the authority
+   * holds the stream's AbortController.
+   *
+   * Use when:
+   * - User clicks a stop/cancel button while the assistant is streaming
+   *   (including during the reasoning phase, before any visible output).
+   *
+   * Expects:
+   * - The chat-sync store is initialized in either authority or follower mode.
+   *
+   * Returns:
+   * - `true` when a controller was aborted locally; `false` when forwarded to
+   *   the authority or when nothing was running.
+   */
+  function cancelGeneration(sessionId?: string) {
+    if (mode.value === 'authority')
+      return chatOrchestrator.abortSession(sessionId)
+
+    // Follower path: fire-and-forget broadcast. We don't await the response
+    // since stop is best-effort and a 30s pending-request timeout would be
+    // pointless here — the user wants the stop to happen immediately.
+    post({
+      type: 'command',
+      requestId: createRequestId(),
+      senderId: instanceId,
+      command: 'cancel',
+      payload: { sessionId },
+    })
+    return false
+  }
+
   return {
     authorityId,
     mode,
@@ -611,5 +654,6 @@ export const useChatSyncStore = defineStore('stage-tamagotchi:chat-sync', () => 
     requestRetry,
     requestCleanup,
     requestDeleteMessage,
+    cancelGeneration,
   }
 })

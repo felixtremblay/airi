@@ -21,7 +21,6 @@
 
 import type { I18n } from '../../libs/i18n'
 import type { ServerChannel } from '../../services/airi/channel-server'
-import type { McpStdioManager } from '../../services/airi/mcp-servers'
 
 import { join, resolve } from 'node:path'
 
@@ -53,7 +52,6 @@ let overlayWindow: BrowserWindow | null = null
  * Returns null if AIRI_DESKTOP_OVERLAY is not set.
  */
 export async function setupDesktopOverlayWindow(params: {
-  mcpStdioManager: McpStdioManager
   serverChannel: ServerChannel
   i18n: I18n
 }): Promise<BrowserWindow | null> {
@@ -86,10 +84,14 @@ export async function setupDesktopOverlayWindow(params: {
   // polling via callTool. If the handlers aren't registered yet, the
   // first eventa invoke hangs forever (no response dispatched back to
   // this window), and all subsequent poll cycles never fire because
-  // the poll loop awaits each call sequentially.
+  // the poll loop awaits each call sequentially. MCP RPC handlers
+  // themselves live on the globally shared context (see
+  // `injeca.provide('rpc:global-context', ...)` in src/main/index.ts);
+  // this overlay provider depends on `globalRpcContext`, so by the time
+  // we get here MCP is already wired and only the readiness contract
+  // needs the per-window context.
   await setupDesktopOverlayElectronInvokes({
     window: overlayWindow,
-    mcpStdioManager: params.mcpStdioManager,
     serverChannel: params.serverChannel,
     i18n: params.i18n,
   })

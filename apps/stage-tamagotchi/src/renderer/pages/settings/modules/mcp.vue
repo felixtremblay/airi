@@ -11,12 +11,14 @@ import {
   electronMcpGetRuntimeStatus,
   electronMcpOpenConfigFile,
 } from '../../../../shared/eventa'
+import { useTamagotchiMcpToolsStore } from '../../../stores/mcp-tools'
 
 const { t } = useI18n()
 
 const openConfigFile = useElectronEventaInvoke(electronMcpOpenConfigFile)
 const applyAndRestart = useElectronEventaInvoke(electronMcpApplyAndRestart)
 const getRuntimeStatus = useElectronEventaInvoke(electronMcpGetRuntimeStatus)
+const mcpToolsStore = useTamagotchiMcpToolsStore()
 
 const isBusy = ref(false)
 const status = ref<ElectronMcpStdioRuntimeStatus>()
@@ -53,6 +55,9 @@ async function handleApplyAndRestart() {
   try {
     const result = await applyAndRestart()
     await refreshStatus()
+    // Re-pull the flattened MCP tool list into useLlmToolsStore so the model
+    // sees the newly started servers without requiring a renderer reload.
+    await mcpToolsStore.refresh()
     lastActionMessage.value = t('settings.pages.modules.mcp-server.messages.restarted', {
       started: result.started.length,
       failed: result.failed.length,
