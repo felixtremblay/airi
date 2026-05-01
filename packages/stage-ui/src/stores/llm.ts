@@ -9,7 +9,7 @@ import { uniqBy } from 'es-toolkit'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { createSparkCommandTool, debug, mcp } from '../tools'
+import { createSparkCommandTool, debug } from '../tools'
 import { useLlmToolsStore } from './llm-tools'
 import { useModsServerChannelStore } from './mods/api/channel-server'
 
@@ -60,9 +60,11 @@ export const useLLM = defineStore('llm', () => {
           await llmToolsStore.awaitPendingRegistrations()
 
           // Reverse twice so later runtime registrations win while original tool order stays stable.
+          // Runtime-registered MCP tools live in `llmToolsStore.activeTools` (one xsai
+          // tool per discovered MCP tool, registered by `useTamagotchiMcpToolsStore`),
+          // so we no longer inject a discovery-proxy fallback here.
           return uniqBy(
             [
-              ...await mcp(),
               ...await debug(),
               ...await createSparkCommandTool({ sendSparkCommand }),
               ...await llmToolsStore.activeTools,

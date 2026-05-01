@@ -1,12 +1,14 @@
 import { useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
 import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/llm-tools'
-import { createMcpTools } from '@proj-airi/stage-ui/tools/mcp'
+import { createFlatMcpTools } from '@proj-airi/stage-ui/tools/mcp'
 import { defineStore } from 'pinia'
 
 import { electronMcpCallTool, electronMcpListTools } from '../../shared/eventa'
 
 /**
- * Registers Electron-backed MCP tools into the shared LLM tools store.
+ * Registers Electron-backed MCP tools into the shared LLM tools store as
+ * flat, top-level tools (one per MCP server tool) so the model can see them
+ * directly without a discovery round-trip.
  *
  * Use when:
  * - The Tamagotchi renderer needs live MCP tools during chat streaming
@@ -23,10 +25,10 @@ export const useTamagotchiMcpToolsStore = defineStore('tamagotchi-mcp-tools', ()
   const callMcpTool = useElectronEventaInvoke(electronMcpCallTool)
 
   async function refresh() {
-    return llmToolsStore.registerTools('mcp', Promise.all(createMcpTools({
+    return llmToolsStore.registerTools('mcp', createFlatMcpTools({
       listTools: () => listMcpTools(),
       callTool: payload => callMcpTool(payload),
-    })))
+    }))
   }
 
   function dispose() {

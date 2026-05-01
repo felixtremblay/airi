@@ -16,7 +16,7 @@ const invokeMocks = vi.hoisted(() => ({
     description: 'Search files.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: { query: { type: 'string' } },
     },
   }]),
 }))
@@ -44,9 +44,9 @@ describe('useTamagotchiMcpToolsStore', async () => {
   /**
    * @example
    * await store.refresh()
-   * expect(llmToolsStore.toolsByProvider.mcp).toHaveLength(2)
+   * expect(llmToolsStore.toolsByProvider.mcp[0].function.name).toBe('filesystem__search')
    */
-  it('loads MCP tools, proxies execution, and clears them from the shared llm-tools store', async () => {
+  it('flattens MCP tools into the shared llm-tools store and proxies execution through the qualified name', async () => {
     const llmToolsStore = useLlmToolsStore()
     const store = useTamagotchiMcpToolsStore()
     const toolOptions = {} as Parameters<Tool['execute']>[1]
@@ -54,42 +54,23 @@ describe('useTamagotchiMcpToolsStore', async () => {
     await store.refresh()
 
     const mcpTools = llmToolsStore.toolsByProvider.mcp
-    const listTools = mcpTools?.find(tool => tool.function.name === 'builtIn_mcpListTools')
-    const callTool = mcpTools?.find(tool => tool.function.name === 'builtIn_mcpCallTool')
+    expect(mcpTools).toHaveLength(1)
+    expect(mcpTools![0].function.name).toBe('search')
+    expect(mcpTools![0].function.description).toBe('Search files.')
 
-    expect(mcpTools).toEqual([
-      expect.objectContaining({ function: expect.objectContaining({ name: 'builtIn_mcpListTools' }) }),
-      expect.objectContaining({ function: expect.objectContaining({ name: 'builtIn_mcpCallTool' }) }),
-    ])
-
-    const listResult = await listTools?.execute({}, toolOptions)
-    const callResult = await callTool?.execute({
-      name: 'filesystem::search',
-      arguments: JSON.stringify({ query: 'hello', limit: 10 }),
-    }, toolOptions)
+    const callResult = await mcpTools![0].execute({ query: 'hello' }, toolOptions)
 
     expect(invokeMocks.listMcpTools).toHaveBeenCalledTimes(1)
     expect(invokeMocks.callMcpTool).toHaveBeenCalledWith({
       name: 'filesystem::search',
-      arguments: { query: 'hello', limit: 10 },
+      arguments: { query: 'hello' },
     })
-    expect(listResult).toEqual([{
-      serverName: 'filesystem',
-      name: 'filesystem::search',
-      toolName: 'search',
-      description: 'Search files.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-    }])
     expect(callResult).toEqual({
       content: [{ type: 'text', text: 'ok' }],
       isError: false,
     })
 
     store.dispose()
-
     expect(llmToolsStore.toolsByProvider.mcp).toBeUndefined()
   })
 })
