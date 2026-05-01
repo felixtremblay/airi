@@ -53,27 +53,19 @@ const contentStyle = computed(() => ({
 const containerRole = computed(() => isOverflowing.value ? 'button' : undefined)
 const containerTabindex = computed(() => isOverflowing.value ? 0 : undefined)
 
+// Compute from line-height; mutating inline -webkit-line-clamp to measure
+// forces a synchronous reflow per ResizeObserver tick during streamed content.
 function measureClampedHeight(element: HTMLElement) {
-  const previousDisplay = element.style.display
-  const previousOverflow = element.style.overflow
-  const previousWebkitBoxOrient = element.style.webkitBoxOrient
-  const previousWebkitLineClamp = element.style.webkitLineClamp
+  const styles = getComputedStyle(element)
 
-  // DOM measurement needs the real rendered width, so temporarily apply the
-  // collapsed CSS to the visible content and restore the previous inline styles.
-  element.style.display = '-webkit-box'
-  element.style.overflow = 'hidden'
-  element.style.webkitBoxOrient = 'vertical'
-  element.style.webkitLineClamp = String(normalizedLineClamp.value)
+  const lineHeight = Number.parseFloat(styles.lineHeight)
+  if (Number.isFinite(lineHeight) && lineHeight > 0)
+    return lineHeight * normalizedLineClamp.value
 
-  const height = element.getBoundingClientRect().height
-
-  element.style.display = previousDisplay
-  element.style.overflow = previousOverflow
-  element.style.webkitBoxOrient = previousWebkitBoxOrient
-  element.style.webkitLineClamp = previousWebkitLineClamp
-
-  return height
+  // Fallback for `line-height: normal`, which parses to NaN. CSS spec hints at
+  // ~1.2x font-size as a reasonable default when normal is unresolved.
+  const fontSize = Number.parseFloat(styles.fontSize) || 16
+  return fontSize * 1.2 * normalizedLineClamp.value
 }
 
 async function measureHeights() {
@@ -86,14 +78,17 @@ async function measureHeights() {
   const nextClosedHeight = measureClampedHeight(element)
   const nextOpenedHeight = element.scrollHeight
 
+  // Skip transient mid-patch readings; would otherwise reset expansion below.
+  if (nextOpenedHeight === 0)
+    return
+
   closedHeight.value = nextClosedHeight
   openedHeight.value = nextOpenedHeight
   isOverflowing.value = nextOpenedHeight > nextClosedHeight + 1
 
-  if (!isOverflowing.value) {
-    expanded.value = false
+  // Auto-correct only when the user has not chosen to expand.
+  if (!isOverflowing.value && !expanded.value)
     lineClamped.value = true
-  }
 }
 
 function toggleExpanded() {
@@ -113,7 +108,7 @@ function toggleExpanded() {
   }
 
   lineClamped.value = false
-  expanded.value = !expanded.value
+  expanded.value = true
 }
 
 function handleContainerKeydown(event: KeyboardEvent) {
@@ -122,6 +117,37 @@ function handleContainerKeydown(event: KeyboardEvent) {
 
   event.preventDefault()
   toggleExpanded()
+}
+
+// Manual tap on pointerdown/up; Chromium and WebKit drop `click` when the
+// press-target is detached mid-press (DOM replaced under cursor during
+// streamed content). Movement check separates tap from drag-to-select.
+const TAP_MOVEMENT_THRESHOLD_PX = 5
+let pointerDownPos: { x: number, y: number } | null = null
+
+function onPointerDown(event: PointerEvent) {
+  // Only capture primary-button presses; ignore right-click, middle-click, etc.
+  if (event.button !== 0)
+    return
+  pointerDownPos = { x: event.clientX, y: event.clientY }
+}
+
+function onPointerUp(event: PointerEvent) {
+  const start = pointerDownPos
+  pointerDownPos = null
+  if (!start)
+    return
+
+  const dx = Math.abs(event.clientX - start.x)
+  const dy = Math.abs(event.clientY - start.y)
+  if (dx > TAP_MOVEMENT_THRESHOLD_PX || dy > TAP_MOVEMENT_THRESHOLD_PX)
+    return // user dragged (likely text selection), not a tap
+
+  toggleExpanded()
+}
+
+function onPointerCancel() {
+  pointerDownPos = null
 }
 
 onMounted(measureHeights)
@@ -140,7 +166,9 @@ useResizeObserver(contentRef, measureHeights)
     :role="containerRole"
     :tabindex="containerTabindex"
     :aria-expanded="isOverflowing ? expanded : undefined"
-    @click="toggleExpanded"
+    @pointerdown="onPointerDown"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerCancel"
     @keydown="handleContainerKeydown"
   >
     <div
