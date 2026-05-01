@@ -3,13 +3,14 @@ import type { WebSocketEvents } from '@proj-airi/server-sdk'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { Message, Tool } from '@xsai/shared-chat'
 
-import { streamFrom as coreStreamFrom, isToolRelatedError, modelKey } from '@proj-airi/core-agent'
+import { streamFrom as coreStreamFrom, isToolRelatedError, modelKey, streamOptionsToolsCompatibilityOk } from '@proj-airi/core-agent'
 import { listModels } from '@xsai/model'
 import { uniqBy } from 'es-toolkit'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 import { createSparkCommandTool, debug } from '../tools'
+import { formatToolUsePromptText } from './chat/context-prompt'
 import { useLlmToolsStore } from './llm-tools'
 import { useModsServerChannelStore } from './mods/api/channel-server'
 
@@ -25,6 +26,59 @@ function toolNameFrom(tool: Tool) {
   }
 
   return candidate.function?.name ?? candidate.name
+}
+
+function toToolArray(tools: Tool | Tool[] | undefined) {
+  if (!tools)
+    return []
+
+  return Array.isArray(tools) ? tools : [tools]
+}
+
+async function resolveOptionTools(tools: StreamOptions['tools']) {
+  if (typeof tools === 'function')
+    return await tools() ?? []
+
+  return tools ?? []
+}
+
+function appendTextToSystemContent(content: string | { text: string }[] | undefined, text: string) {
+  if (!content)
+    return text
+
+  if (typeof content === 'string')
+    return `${content}\n\n${text}`
+
+  return `${content.map(part => part.text).join('')}\n\n${text}`
+}
+
+function withToolUsePrompt(messages: Message[], promptTools: Tool[]): Message[] {
+  const toolUsePrompt = formatToolUsePromptText(promptTools)
+  if (!toolUsePrompt)
+    return messages
+
+  const existingSystemIndex = messages.findIndex(message => message.role === 'system')
+  if (existingSystemIndex === -1) {
+    return [
+      {
+        role: 'system',
+        content: toolUsePrompt,
+      },
+      ...messages,
+    ]
+  }
+
+  return messages.map((message, index) => {
+    if (index !== existingSystemIndex)
+      return message
+    if (message.role !== 'system')
+      return message
+
+    return {
+      ...message,
+      content: appendTextToSystemContent(message.content, toolUsePrompt),
+    }
+  })
 }
 
 export const useLLM = defineStore('llm', () => {
@@ -51,26 +105,44 @@ export const useLLM = defineStore('llm', () => {
         })
       }
 
+      const supportedTools = streamOptionsToolsCompatibilityOk(model, chatProvider, options)
+      const customTools = supportedTools ? await resolveOptionTools(options?.tools) : []
+      let resolvedTools: Tool[] = []
+
+      if (supportedTools) {
+        await llmToolsStore.awaitPendingRegistrations()
+
+        // Reverse twice so later runtime registrations win while original tool order stays stable.
+        // Runtime-registered MCP tools live in `llmToolsStore.activeTools` (one xsai
+        // tool per discovered MCP tool, registered by `useTamagotchiMcpToolsStore`),
+        // so we no longer inject a discovery-proxy fallback here.
+        const builtinTools = uniqBy(
+          [
+            ...await debug(),
+            ...toToolArray(await createSparkCommandTool({ sendSparkCommand }) as Tool | Tool[]),
+            ...llmToolsStore.activeTools,
+          ].toReversed(),
+          tool => toolNameFrom(tool) ?? tool,
+        ).toReversed()
+
+        resolvedTools = [...builtinTools, ...customTools]
+      }
+
+      const promptTools = supportedTools
+        ? [
+            ...(llmToolsStore.toolsByProvider.mcp ?? []),
+            ...customTools,
+          ]
+        : []
+
       await coreStreamFrom({
         model,
         chatProvider,
-        messages,
-        options: { ...options, toolsCompatibility: toolsCompatibility.value },
-        builtinToolsResolver: async () => {
-          await llmToolsStore.awaitPendingRegistrations()
-
-          // Reverse twice so later runtime registrations win while original tool order stays stable.
-          // Runtime-registered MCP tools live in `llmToolsStore.activeTools` (one xsai
-          // tool per discovered MCP tool, registered by `useTamagotchiMcpToolsStore`),
-          // so we no longer inject a discovery-proxy fallback here.
-          return uniqBy(
-            [
-              ...await debug(),
-              ...await createSparkCommandTool({ sendSparkCommand }),
-              ...await llmToolsStore.activeTools,
-            ].toReversed(),
-            tool => toolNameFrom(tool) ?? tool,
-          ).toReversed()
+        messages: withToolUsePrompt(messages, promptTools),
+        options: {
+          ...options,
+          tools: resolvedTools,
+          toolsCompatibility: toolsCompatibility.value,
         },
       })
     }
