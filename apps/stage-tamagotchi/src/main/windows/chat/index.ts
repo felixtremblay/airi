@@ -1,6 +1,5 @@
 import type { I18n } from '../../libs/i18n'
 import type { ServerChannel } from '../../services/airi/channel-server'
-import type { McpStdioManager } from '../../services/airi/mcp-servers'
 import type { WidgetsWindowManager } from '../widgets'
 
 import { join, resolve } from 'node:path'
@@ -16,7 +15,6 @@ import { setupChatWindowElectronInvokes } from './rpc/index.electron'
 export function setupChatWindowReusableFunc(params: {
   widgetsManager: WidgetsWindowManager
   serverChannel: ServerChannel
-  mcpStdioManager: McpStdioManager
   i18n: I18n
 }) {
   return createReusableWindow(async () => {
@@ -44,7 +42,6 @@ export function setupChatWindowReusableFunc(params: {
       window,
       widgetsManager: params.widgetsManager,
       serverChannel: params.serverChannel,
-      mcpStdioManager: params.mcpStdioManager,
       i18n: params.i18n,
     })
 
