@@ -4,9 +4,13 @@ const ESCAPED_TAG_OPEN = '<{\'|\'}'
 const ESCAPED_TAG_CLOSE = '{\'|\'}>'
 
 interface MarkerToken {
-  type: 'literal' | 'special'
+  type: 'literal' | 'special' | 'flush-ack'
   value: string
 }
+
+type ParserInputChunk
+  = | { kind: 'text', text: string }
+    | { kind: 'flush' }
 
 interface MarkerParserOptions {
   minLiteralEmitLength?: number
@@ -120,32 +124,56 @@ function createLlmMarkerParser(options?: MarkerParserOptions) {
         buffer = ''
       }
     },
+
+    /**
+     * Force-emits any buffered literal text without closing the parser.
+     *
+     * Use when:
+     * - An out-of-band event (e.g. a tool-call event from the upstream LLM
+     *   stream) is about to interrupt the visible token order. Without
+     *   flushing, the buffer's tail (held back to disambiguate marker
+     *   openings) only surfaces after the interrupting event, producing
+     *   the "last token cut and shown after the tool call" bug.
+     *
+     * Expects:
+     * - Caller asserts no more text-deltas are coming "right now". If a
+     *   tag open is mid-buffer (inTag == true) the flush is skipped to
+     *   avoid splitting a marker.
+     */
+    async flush(onLiteral: (value: string) => Promise<void> | void) {
+      if (!inTag && buffer.length > 0) {
+        await onLiteral(buffer)
+        buffer = ''
+      }
+    },
   }
 }
 
-function createLlmMarkerStream(input: ReadableStream<string>, options?: MarkerParserOptions) {
+function createLlmMarkerStream(input: ReadableStream<ParserInputChunk>, options?: MarkerParserOptions) {
   const { stream, write, close, error } = createPushStream<MarkerToken>()
   const parser = createLlmMarkerParser(options)
 
+  const onLiteral = async (literal: string) => {
+    if (!literal)
+      return
+    write({ type: 'literal', value: literal })
+  }
+  const onSpecial = async (special: string) => {
+    write({ type: 'special', value: special })
+  }
+
   void readStream(input, async (chunk) => {
-    await parser.consume(
-      chunk,
-      async (literal) => {
-        if (!literal)
-          return
-        write({ type: 'literal', value: literal })
-      },
-      async (special) => {
-        write({ type: 'special', value: special })
-      },
-    )
+    if (chunk.kind === 'text') {
+      await parser.consume(chunk.text, onLiteral, onSpecial)
+      return
+    }
+    // Flush request: emit any buffered literal first, then ack so the
+    // public flush() promise can resolve in caller-write order.
+    await parser.flush(onLiteral)
+    write({ type: 'flush-ack', value: '' })
   })
     .then(async () => {
-      await parser.end(async (literal) => {
-        if (!literal)
-          return
-        write({ type: 'literal', value: literal })
-      })
+      await parser.end(onLiteral)
       close()
     })
     .catch((err) => {
@@ -184,15 +212,28 @@ export function useLlmmarkerParser(options: {
   minLiteralEmitLength?: number
 }) {
   let fullText = ''
-  const { stream, write, close } = createPushStream<string>()
+  const { stream, write, close } = createPushStream<ParserInputChunk>()
 
   const markerStream = createLlmMarkerStream(stream, { minLiteralEmitLength: options.minLiteralEmitLength })
 
+  // Pending flush() promises, resolved in FIFO order as `flush-ack` tokens
+  // arrive on the output stream. FIFO is preserved because both inputs
+  // (text chunks + flush requests) share one ReadableStream and tokens are
+  // written sequentially as the inner parser consumes them.
+  const pendingFlushAcks: Array<() => void> = []
+
   const processing = readStream(markerStream, async (token) => {
-    if (token.type === 'literal')
+    if (token.type === 'literal') {
       await options.onLiteral?.(token.value)
-    if (token.type === 'special')
+      return
+    }
+    if (token.type === 'special') {
       await options.onSpecial?.(token.value)
+      return
+    }
+    if (token.type === 'flush-ack') {
+      pendingFlushAcks.shift()?.()
+    }
   })
 
   return {
@@ -202,7 +243,27 @@ export function useLlmmarkerParser(options: {
      */
     async consume(textPart: string) {
       fullText += textPart
-      write(textPart)
+      write({ kind: 'text', text: textPart })
+    },
+
+    /**
+     * Force-emits any buffered literal text immediately, in stream order.
+     *
+     * Use when:
+     * - An out-of-band event (tool call, reasoning event, etc.) is about
+     *   to be appended to the UI and you want any buffered literal text
+     *   to land *before* it. Without this, up to a handful of trailing
+     *   chars stay trapped in the parser's buffer and surface only when
+     *   the next text-delta arrives, producing visibly out-of-order text.
+     *
+     * Returns:
+     * - Resolves once every chunk written before this call has been
+     *   processed by the inner parser and any pending literal emitted.
+     */
+    async flush() {
+      const ack = new Promise<void>(resolve => pendingFlushAcks.push(resolve))
+      write({ kind: 'flush' })
+      await ack
     },
 
     /**

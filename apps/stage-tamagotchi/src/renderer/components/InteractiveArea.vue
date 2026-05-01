@@ -95,9 +95,21 @@ async function handleSend() {
     attachmentsToSend.forEach(att => URL.revokeObjectURL(att.url))
   }
   catch (error) {
-    // restore on failure
-    messageInput.value = textToSend
-    attachments.value = attachmentsToSend
+    // Decide whether to restore the user's text into the input.
+    // If the user message already made it into the session, the assistant
+    // most likely also produced (partial) output before the error surfaced —
+    // restoring would re-paste a message that was already sent. Only restore
+    // when the session never received the text (true pre-send failure such
+    // as "no provider configured").
+    const sessionMessages = chatSession.getSessionMessages(chatSession.activeSessionId)
+    const wasSentToSession = sessionMessages.some(m => m.role === 'user' && (typeof m.content === 'string' ? m.content === textToSend : false))
+    if (!wasSentToSession) {
+      messageInput.value = textToSend
+      attachments.value = attachmentsToSend
+    }
+    else {
+      attachmentsToSend.forEach(att => URL.revokeObjectURL(att.url))
+    }
     chatSession.setSessionMessages(chatSession.activeSessionId, [
       ...messages.value,
       {
@@ -106,6 +118,10 @@ async function handleSend() {
       },
     ])
   }
+}
+
+function handleStop() {
+  chatSyncStore.cancelGeneration()
 }
 
 function sendFromKeyboard() {
@@ -274,6 +290,24 @@ async function handleRetryMessage(index: number) {
       </div>
     </div>
     <div :class="['flex items-center justify-end gap-2 py-1']">
+      <!-- Stop button: only visible while a generation is in flight. Bumps
+           the session generation, which trips every `shouldAbort()` checkpoint
+           in the streaming pipeline. Safe to click multiple times. -->
+      <button
+        v-if="sending"
+        :class="[
+          'max-h-[10lh] min-h-[1lh]',
+          'flex items-center justify-center rounded-md p-2 outline-none',
+          'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300',
+          'hover:bg-red-500/20 dark:hover:bg-red-500/30',
+          'transition-colors transition-transform active:scale-95',
+        ]"
+        title="Stop generating"
+        @click="handleStop"
+      >
+        <div class="i-solar:stop-circle-bold-duotone text-lg" />
+      </button>
+
       <DropdownMenuRoot>
         <DropdownMenuTrigger as-child>
           <button
