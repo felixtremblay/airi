@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createTimestampPrefixStripper, formatTimePrefix, stripLeadingTimestampPrefix } from './datetime-prefix'
+import { createTimestampPrefixStripper, formatTimePrefix, stripTimestampPrefixesAtLineHeads } from './datetime-prefix'
 
 describe('formatTimePrefix', () => {
   it('wraps `[YYYY-MM-DD HH:MM]` with trailing space', () => {
@@ -90,7 +90,7 @@ describe('createTimestampPrefixStripper', () => {
 
   it('strips multiple newline-anchored prefixes in a single string', () => {
     expect(
-      stripLeadingTimestampPrefix(
+      stripTimestampPrefixesAtLineHeads(
         '[2026-05-01 20:25] one\n[2026-05-01 20:26] two\n[2026-05-01 20:27] three',
       ),
     ).toBe('one\ntwo\nthree')
@@ -115,5 +115,33 @@ describe('createTimestampPrefixStripper', () => {
   it('rejects an almost-prefix where a non-digit appears in a digit slot', () => {
     const stripper = createTimestampPrefixStripper()
     expect(stripper.consume('[2026-XX-01 20:08] body')).toBe('[2026-XX-01 20:08] body')
+  })
+
+  it('strips a second line-head prefix that straddles a chunk boundary', () => {
+    const stripper = createTimestampPrefixStripper()
+    expect(stripper.consume('[2026-05-01 20:08] one\n')).toBe('one\n')
+    expect(stripper.consume('[2026-05-01 20:09] two')).toBe('two')
+  })
+
+  it('strips a `\\r\\n[ts]` echo, preserving the CR/LF and removing only the timestamp', () => {
+    const stripper = createTimestampPrefixStripper()
+    expect(stripper.consume('first\r\n[2026-05-01 20:08] second')).toBe('first\r\nsecond')
+    expect(
+      stripTimestampPrefixesAtLineHeads('first\r\n[2026-05-01 20:08] second'),
+    ).toBe('first\r\nsecond')
+  })
+
+  it('treats `consume(\'\')` as a no-op without disturbing buffered state', () => {
+    const stripper = createTimestampPrefixStripper()
+    expect(stripper.consume('[2026-')).toBe('')
+    expect(stripper.consume('')).toBe('')
+    expect(stripper.consume('05-01 20:08] tail')).toBe('tail')
+  })
+
+  it('makes `end()` idempotent when called twice', () => {
+    const stripper = createTimestampPrefixStripper()
+    expect(stripper.consume('[2026-')).toBe('')
+    expect(stripper.end()).toBe('[2026-')
+    expect(stripper.end()).toBe('')
   })
 })
