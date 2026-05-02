@@ -18,7 +18,7 @@ import { activeTurnSpan, startSpan } from '../composables/use-io-tracer'
 import { formatContextPromptText } from './chat/context-prompt'
 import { createMinecraftContext } from './chat/context-providers'
 import { useChatContextStore } from './chat/context-store'
-import { formatTimePrefix } from './chat/datetime-prefix'
+import { createTimestampPrefixStripper, formatTimePrefix, stripTimestampPrefixesAtLineHeads } from './chat/datetime-prefix'
 import { createChatHooks } from './chat/hooks'
 import { useChatSessionStore } from './chat/session-store'
 import { useChatStreamStore } from './chat/stream-store'
@@ -261,35 +261,43 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       // --------------------------------
 
       const categorizer = createStreamingCategorizer(activeProvider.value)
+      const timestampStripper = createTimestampPrefixStripper()
       let streamPosition = 0
 
+      async function emitLiteral(literal: string) {
+        if (literal.length === 0)
+          return
+
+        categorizer.consume(literal)
+
+        const speechOnly = categorizer.filterToSpeech(literal, streamPosition)
+        streamPosition += literal.length
+
+        if (speechOnly.trim()) {
+          buildingMessage.content += speechOnly
+
+          await hooks.emitTokenLiteralHooks(speechOnly, streamingMessageContext)
+
+          const lastSlice = buildingMessage.slices.at(-1)
+          if (lastSlice?.type === 'text') {
+            lastSlice.text += speechOnly
+          }
+          else {
+            buildingMessage.slices.push({
+              type: 'text',
+              text: speechOnly,
+            })
+          }
+          updateUI()
+        }
+      }
+
       const parser = useLlmmarkerParser({
-        onLiteral: async (literal) => {
+        onLiteral: async (rawLiteral) => {
           if (shouldAbort())
             return
 
-          categorizer.consume(literal)
-
-          const speechOnly = categorizer.filterToSpeech(literal, streamPosition)
-          streamPosition += literal.length
-
-          if (speechOnly.trim()) {
-            buildingMessage.content += speechOnly
-
-            await hooks.emitTokenLiteralHooks(speechOnly, streamingMessageContext)
-
-            const lastSlice = buildingMessage.slices.at(-1)
-            if (lastSlice?.type === 'text') {
-              lastSlice.text += speechOnly
-            }
-            else {
-              buildingMessage.slices.push({
-                type: 'text',
-                text: speechOnly,
-              })
-            }
-            updateUI()
-          }
+          await emitLiteral(timestampStripper.consume(rawLiteral))
         },
         onSpecial: async (special) => {
           if (shouldAbort())
@@ -301,7 +309,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
           if (isStaleGeneration())
             return
 
-          const finalCategorization = categorizeResponse(fullText, activeProvider.value)
+          const finalCategorization = categorizeResponse(stripTimestampPrefixesAtLineHeads(fullText), activeProvider.value)
 
           const reasoningContentField = buildingMessage.categorization?.reasoning?.trim()
           buildingMessage.categorization = {
@@ -501,6 +509,11 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       }
 
       await parser.end()
+
+      // Flush any prefix-candidate tail the stripper held back so the live
+      // transcript and TTS see the same final bytes that `onEnd` categorizes.
+      if (!shouldAbort())
+        await emitLiteral(timestampStripper.end())
 
       if (!isStaleGeneration() && buildingMessage.slices.length > 0) {
         chatSession.appendSessionMessage(sessionId, toRaw(buildingMessage))
