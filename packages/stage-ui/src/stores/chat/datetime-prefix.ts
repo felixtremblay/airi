@@ -36,10 +36,26 @@ const DATE_TIME = new Intl.DateTimeFormat('en-CA', {
 })
 
 /**
- * Formats a timestamp as `[YYYY-MM-DD HH:MM] ` in the user's local timezone,
- * including the trailing space, e.g. `"[2026-04-25 18:47] "`.
+ * Formats a timestamp as `[YYYY-MM-DD HH:MM] ` in the user's local timezone.
+ *
+ * Use when:
+ * - Annotating user/assistant messages so the model has a concrete time
+ *   anchor on every turn. Historic and current alike use the same shape so
+ *   that prefix-cache stays valid when a "current" turn becomes "historic" on
+ *   the next send.
+ *
+ * Returns:
+ * - String including a trailing space, e.g. `"[2026-04-25 18:47] "`.
+ *
+ * Before:
+ * - createdAt = 1745570820000  (a Unix ms in Asia/Shanghai)
+ *
+ * After:
+ * - "[2026-04-25 18:47] "
  */
 export function formatTimePrefix(createdAt: number): string {
+  // Intl en-CA locale uses ISO-style `YYYY-MM-DD, HH:MM`. Strip the comma to
+  // produce the bracketed `YYYY-MM-DD HH:MM` form.
   const formatted = DATE_TIME.format(new Date(createdAt)).replace(', ', ' ')
   return `[${formatted}] `
 }
