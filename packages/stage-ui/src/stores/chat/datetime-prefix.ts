@@ -60,14 +60,15 @@ export function formatTimePrefix(createdAt: number): string {
   return `[${formatted}] `
 }
 
-const TIMESTAMP_PREFIX_RE = /(^|\n)\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ?/g
-const TIMESTAMP_BODY_LEN = 19
-const TIMESTAMP_BODY_TEMPLATE = '[####-##-## ##:##]'
+const PREFIX_AT_LINE_HEAD_RE = /(^|\n)\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ?/g
+const PREFIX_ANCHORED_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ?/
+const PREFIX_MAX_LEN = 19
+const PREFIX_TEMPLATE = '[####-##-## ##:##]'
 
-function bodyCouldMatchAt(buf: string, start: number): boolean {
-  const limit = Math.min(buf.length - start, TIMESTAMP_BODY_TEMPLATE.length)
+function couldStillMatchPrefix(buf: string, start: number): boolean {
+  const limit = Math.min(buf.length - start, PREFIX_TEMPLATE.length)
   for (let i = 0; i < limit; i++) {
-    const slot = TIMESTAMP_BODY_TEMPLATE[i]
+    const slot = PREFIX_TEMPLATE[i]
     const ch = buf[start + i]
     const ok = slot === '#' ? (ch >= '0' && ch <= '9') : ch === slot
     if (!ok)
@@ -77,11 +78,27 @@ function bodyCouldMatchAt(buf: string, start: number): boolean {
 }
 
 /**
- * Removes echoed `[YYYY-MM-DD HH:MM] ` prefixes that appear at the start of
- * the input or immediately after a newline. Used on assembled text.
+ * Looks at `input[start..]` and reports what to do with a possible prefix:
+ * - a number `>= start` to skip past a matched prefix (or `=== start` if no
+ *   prefix was present)
+ * - `null` if there are not yet enough bytes to decide; the caller should
+ *   buffer the tail and try again with the next chunk
+ */
+function consumePrefixAt(input: string, start: number, isFinal: boolean): number | null {
+  const haveEnough = input.length - start >= PREFIX_MAX_LEN
+  if (haveEnough || isFinal) {
+    const match = input.slice(start, start + PREFIX_MAX_LEN).match(PREFIX_ANCHORED_RE)
+    return match ? start + match[0].length : start
+  }
+  return couldStillMatchPrefix(input, start) ? null : start
+}
+
+/**
+ * Removes echoed `[YYYY-MM-DD HH:MM] ` prefixes that sit at a line head
+ * (start of input or immediately after a `\n`). Used on assembled text.
  */
 export function stripLeadingTimestampPrefix(text: string): string {
-  return text.replace(TIMESTAMP_PREFIX_RE, '$1')
+  return text.replace(PREFIX_AT_LINE_HEAD_RE, '$1')
 }
 
 /**
@@ -93,36 +110,31 @@ export function createTimestampPrefixStripper() {
   let pending = ''
   let lastModelChar: string | null = null
 
-  const BODY_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ?/
-
-  function process(input: string, isFinal: boolean): string {
+  function stripChunk(input: string, isFinal: boolean): string {
     let out = ''
     let i = 0
+    let atLineHead = lastModelChar === null || lastModelChar === '\n'
 
     while (i < input.length) {
-      const prev = i > 0 ? input[i - 1] : lastModelChar
-      const atBoundary = prev === null || prev === '\n'
-
-      if (!atBoundary) {
-        out += input[i++]
+      if (atLineHead) {
+        const after = consumePrefixAt(input, i, isFinal)
+        if (after === null) {
+          pending = input.slice(i)
+          return out
+        }
+        i = after
+        atLineHead = false
         continue
       }
 
-      const remaining = input.length - i
-      if (remaining >= TIMESTAMP_BODY_LEN || isFinal) {
-        const match = input.slice(i, i + TIMESTAMP_BODY_LEN).match(BODY_RE)
-        if (match)
-          i += match[0].length
-        else
-          out += input[i++]
-        continue
-      }
-
-      if (bodyCouldMatchAt(input, i)) {
-        pending = input.slice(i)
+      const nl = input.indexOf('\n', i)
+      if (nl < 0) {
+        out += input.slice(i)
         return out
       }
-      out += input[i++]
+      out += input.slice(i, nl + 1)
+      i = nl + 1
+      atLineHead = true
     }
 
     return out
@@ -135,18 +147,20 @@ export function createTimestampPrefixStripper() {
 
       const merged = pending + chunk
       pending = ''
-      const out = process(merged, false)
+      const out = stripChunk(merged, false)
 
-      const consumedEnd = merged.length - pending.length
-      if (consumedEnd > 0)
-        lastModelChar = merged[consumedEnd - 1]
+      // Track the char immediately before whatever ends up in `pending` so
+      // the next chunk knows whether its first byte sits at a line head.
+      const pendingStart = merged.length - pending.length
+      if (pendingStart > 0)
+        lastModelChar = merged[pendingStart - 1]
 
       return out
     },
     end(): string {
       if (pending === '')
         return ''
-      const out = process(pending, true)
+      const out = stripChunk(pending, true)
       pending = ''
       return out
     },
