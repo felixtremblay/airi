@@ -261,8 +261,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       // --------------------------------
 
       const categorizer = createStreamingCategorizer(activeProvider.value)
-      // Drops the leading `[YYYY-MM-DD HH:MM] ` echo before it reaches both
-      // the chat transcript and TTS. See `./chat/datetime-prefix.ts`.
       const timestampStripper = createTimestampPrefixStripper()
       let streamPosition = 0
 
@@ -308,8 +306,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
           if (isStaleGeneration())
             return
 
-          // Strip the echoed timestamp from the persisted text so subsequent
-          // turns do not re-send `[ts] [ts] ...` and reinforce the pattern.
           const finalCategorization = categorizeResponse(stripLeadingTimestampPrefix(fullText), activeProvider.value)
 
           const reasoningContentField = buildingMessage.categorization?.reasoning?.trim()

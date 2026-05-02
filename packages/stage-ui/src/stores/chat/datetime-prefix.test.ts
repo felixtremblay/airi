@@ -33,16 +33,6 @@ describe('formatTimePrefix', () => {
   })
 })
 
-// ROOT CAUSE:
-//
-// Weak local models echo the `[YYYY-MM-DD HH:MM] ` prefix that
-// `formatTimePrefix` injects onto every user/assistant turn (see
-// chat.ts:351,356). The echoed prefix then leaked into both the chat
-// transcript (buildingMessage.content) and the TTS pipeline
-// (hooks.emitTokenLiteralHooks), so the synthesized voice would read
-// "bracket twenty twenty six dash zero five..." aloud before the actual
-// reply. We strip it at the streaming boundary in chat.ts onLiteral so
-// neither the rendered transcript nor the audio contains it.
 describe('createTimestampPrefixStripper', () => {
   it('strips a leading `[YYYY-MM-DD HH:MM] ` prefix delivered as one chunk', () => {
     const stripper = createTimestampPrefixStripper()
@@ -82,12 +72,6 @@ describe('createTimestampPrefixStripper', () => {
   })
 
   it('strips a timestamp echoed after a newline mid-stream', () => {
-    // ROOT CAUSE:
-    //
-    // Models that have already emitted a sentence sometimes echo a fresh
-    // `\n[YYYY-MM-DD HH:MM] ` before continuing on a new line, mirroring
-    // the per-turn datetime injection. The earlier leading-only stripper
-    // missed this and the timestamp leaked into chat + TTS.
     const stripper = createTimestampPrefixStripper()
     const chunks = [
       'Cool, cool, cool. What kind of edge cases?\n',
@@ -130,7 +114,6 @@ describe('createTimestampPrefixStripper', () => {
 
   it('rejects an almost-prefix where a non-digit appears in a digit slot', () => {
     const stripper = createTimestampPrefixStripper()
-    // `[2026-XX...` — `X` is not a digit, so this is not the timestamp shape.
     expect(stripper.consume('[2026-XX-01 20:08] body')).toBe('[2026-XX-01 20:08] body')
   })
 })
