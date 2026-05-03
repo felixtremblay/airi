@@ -1,7 +1,7 @@
 {
   "name": "@proj-airi/stage-tamagotchi",
   "type": "module",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "LLM powered virtual character",
   "author": {
@@ -17,6 +17,7 @@
     "app:dev": "pnpm run dev",
     "app:build": "pnpm run build",
     "start": "electron-vite preview",
+    "start:xwayland": "electron-vite preview -- --ozone-platform=x11",
     "dev": "electron-vite dev",
     "dev:xwayland": "electron-vite dev -- --ozone-platform=x11",
     "build": "electron-vite build",
